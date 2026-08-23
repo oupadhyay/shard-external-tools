@@ -1,14 +1,12 @@
-/**
- * YouTube Transcript Integration
- *
- * Fetches video transcripts using `yt-dlp` for metadata + direct caption URL fetch.
- * Flow:
- *   1. Extract video ID from URL or raw ID
- *   2. Run `yt-dlp -j` to get video metadata JSON (includes subtitle URLs)
- *   3. Pick the best caption track (manual English > auto English > first available)
- *   4. Fetch the XML transcript from the caption track URL (srv1 format)
- *   5. Parse XML into timestamped text segments
- */
+//! YouTube transcript acquisition and rendering.
+//!
+//! Fetches video transcripts using `yt-dlp` for metadata and direct caption URL fetching:
+//! 1. Extract the video ID from a URL or raw ID.
+//! 2. Run `yt-dlp -j` to get video metadata JSON, including subtitle URLs.
+//! 3. Pick the best caption track (manual English > auto English > first available).
+//! 4. Validate and fetch the XML transcript from the caption track URL (srv1 format).
+//! 5. Parse the XML into timestamped text segments.
+
 use reqwest::Client;
 use serde::Deserialize;
 use std::future::Future;
@@ -282,18 +280,27 @@ pub async fn fetch_youtube_transcript(
     video: &str,
     process_config: &YoutubeProcessConfig,
 ) -> Result<YoutubeTranscriptToolOutput, String> {
-    fetch_youtube_transcript_with(http_client, video, process_config, execute_ytdlp).await
+    fetch_youtube_transcript_with(
+        http_client,
+        video,
+        process_config,
+        execute_ytdlp,
+        validate_caption_url,
+    )
+    .await
 }
 
-async fn fetch_youtube_transcript_with<F, Fut>(
+async fn fetch_youtube_transcript_with<F, Fut, V>(
     http_client: &Client,
     video: &str,
     process_config: &YoutubeProcessConfig,
     execute: F,
+    validate_caption: V,
 ) -> Result<YoutubeTranscriptToolOutput, String>
 where
     F: FnOnce(YtDlpCommand) -> Fut,
     Fut: Future<Output = Result<YtDlpOutput, String>>,
+    V: FnOnce(&str) -> Result<reqwest::Url, String>,
 {
     let video_id = extract_video_id(video).ok_or_else(|| {
         format!(
@@ -302,7 +309,14 @@ where
         )
     })?;
 
-    let result = fetch_transcript_with(http_client, &video_id, process_config, execute).await?;
+    let result = fetch_transcript_with(
+        http_client,
+        &video_id,
+        process_config,
+        execute,
+        validate_caption,
+    )
+    .await?;
     let formatted = format_transcript(
         &result.segments,
         result.title.as_deref(),
@@ -323,15 +337,17 @@ where
 ///
 /// Uses `yt-dlp -j` to get subtitle URLs, then fetches the XML caption track.
 /// Prefers manual English captions, falls back to auto-generated, then first available.
-async fn fetch_transcript_with<F, Fut>(
+async fn fetch_transcript_with<F, Fut, V>(
     client: &Client,
     video_id: &str,
     process_config: &YoutubeProcessConfig,
     execute: F,
+    validate_caption: V,
 ) -> Result<TranscriptResult, String>
 where
     F: FnOnce(YtDlpCommand) -> Fut,
     Fut: Future<Output = Result<YtDlpOutput, String>>,
+    V: FnOnce(&str) -> Result<reqwest::Url, String>,
 {
     log::info!("[YouTube] Fetching transcript for video: {}", video_id);
 
@@ -343,16 +359,19 @@ where
     let channel = metadata.channel.clone();
 
     // 2. Pick the best caption track URL (srv1 XML format)
-    let caption_url = pick_caption_url(&metadata)?;
+    let caption_url = validate_caption(&pick_caption_url(&metadata)?)?;
 
-    log::info!("[YouTube] Fetching caption XML from: {}", caption_url);
+    log::info!(
+        "[YouTube] Fetching caption XML from approved host: {}",
+        caption_url.host_str().unwrap_or("unknown")
+    );
 
     // 3. Fetch the XML transcript
     let xml_resp = client
-        .get(&caption_url)
+        .get(caption_url)
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch transcript XML: {}", e))?;
+        .map_err(|e| format!("Failed to fetch transcript XML: {}", e.without_url()))?;
 
     if !xml_resp.status().is_success() {
         return Err(format!(
@@ -364,7 +383,7 @@ where
     let xml_text = xml_resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read transcript XML body: {}", e))?;
+        .map_err(|e| format!("Failed to read transcript XML body: {}", e.without_url()))?;
 
     // 4. Parse XML into segments
     let transcript: Transcript = quick_xml::de::from_str(&xml_text)
@@ -398,6 +417,31 @@ where
         channel,
         segments,
     })
+}
+
+const CAPTION_URL_ERROR: &str =
+    "Rejected caption URL from yt-dlp: expected an HTTPS YouTube or Googlevideo URL";
+
+fn validate_caption_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw_url).map_err(|_| CAPTION_URL_ERROR.to_string())?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| CAPTION_URL_ERROR.to_string())?;
+    let allowed_host = host == "youtube.com"
+        || host.ends_with(".youtube.com")
+        || host == "googlevideo.com"
+        || host.ends_with(".googlevideo.com");
+
+    if url.scheme() != "https"
+        || !allowed_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return Err(CAPTION_URL_ERROR.to_string());
+    }
+
+    Ok(url)
 }
 
 async fn run_ytdlp_with<F, Fut>(
@@ -706,6 +750,7 @@ mod tests {
                     stderr: Vec::new(),
                 })
             },
+            |url| reqwest::Url::parse(url).map_err(|error| error.to_string()),
         )
         .await
         .unwrap();
@@ -724,6 +769,62 @@ mod tests {
             "YouTube Transcript — Test Video — Test Channel (https://youtu.be/dQw4w9WgXcQ)\n2 segments\n\nTitle: Test Video\nChannel: Test Channel\nDuration: 01:07\n\n[00:00] Hello world\n[01:05] Second segment\n"
         );
         server.verify().await;
+    }
+
+    #[test]
+    fn test_validate_caption_url_allows_expected_https_hosts() {
+        for url in [
+            "https://www.youtube.com/api/timedtext?lang=en",
+            "https://youtube.com/api/timedtext",
+            "https://manifest.googlevideo.com/api/timedtext",
+            "https://googlevideo.com/api/timedtext",
+        ] {
+            assert_eq!(validate_caption_url(url).unwrap().as_str(), url);
+        }
+    }
+
+    #[test]
+    fn test_validate_caption_url_rejects_untrusted_or_malformed_urls() {
+        for url in [
+            "http://www.youtube.com/api/timedtext",
+            "https://youtube.com.evil.example/api/timedtext",
+            "https://notyoutube.com/api/timedtext",
+            "https://127.0.0.1/api/timedtext",
+            "https://youtube.com@127.0.0.1/api/timedtext",
+            "https://user@youtube.com/api/timedtext",
+            "https://www.youtube.com:8443/api/timedtext",
+            "not a URL",
+        ] {
+            assert!(validate_caption_url(url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transcript_acquisition_rejects_untrusted_caption_url_before_fetch() {
+        let result = fetch_youtube_transcript_with(
+            &Client::new(),
+            "dQw4w9WgXcQ",
+            &YoutubeProcessConfig::default(),
+            |_| async {
+                Ok(YtDlpOutput {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: br#"{
+                        "title": "Untrusted captions",
+                        "subtitles": {
+                            "en": [{"url": "http://127.0.0.1/captions", "ext": "srv1"}]
+                        },
+                        "automatic_captions": {}
+                    }"#
+                    .to_vec(),
+                    stderr: Vec::new(),
+                })
+            },
+            validate_caption_url,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), CAPTION_URL_ERROR);
     }
 
     #[test]
