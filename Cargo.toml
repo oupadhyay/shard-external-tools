@@ -3,6 +3,8 @@ name = "shard-external-tools"
 version = "0.1.0"
 description = "Host-free external API tools for Shard"
 edition = "2021"
+readme = "README.md"
+repository = "https://github.com/oupadhyay/shard-external-tools"
 publish = false
 
 [dependencies]
