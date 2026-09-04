@@ -43,6 +43,22 @@ this crate, and `shard-provider` must use that same tool-API revision to avoid
 duplicate nominal Rust types. `publish = false` intentionally prevents
 accidental crates.io publication.
 
+## Host cutover status
+
+The standalone-crate cutover was completed in
+[`shard-v2` PR #123](https://github.com/oupadhyay/shard-v2/pull/123). The
+initial host cutover consumed `shard-external-tools` revision
+`b0fc45572caf17af2e8f46fb3f0a181f084ef9dd`. The authoritative record of the
+revisions currently consumed by the host is the host's
+[`Cargo.toml`](https://github.com/oupadhyay/shard-v2/blob/main/src-tauri/Cargo.toml)
+and resolved
+[`Cargo.lock`](https://github.com/oupadhyay/shard-v2/blob/main/src-tauri/Cargo.lock),
+not this documentation branch or this repository's current HEAD.
+
+Future portable external-tool changes must be merged and validated here first.
+The host must then pin the resulting immutable revision and validate its
+updated lockfile and dependency graph.
+
 ## Development
 
 The repository pins its Rust toolchain in `rust-toolchain.toml` and commits

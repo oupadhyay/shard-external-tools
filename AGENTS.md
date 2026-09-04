@@ -84,6 +84,18 @@ coverage.
 When this crate changes, merge and validate it standalone before updating
 `shard-v2` to the exact new Git revision.
 
+The standalone cutover completed in
+[`shard-v2` PR #123](https://github.com/oupadhyay/shard-v2/pull/123), initially
+using this repository at `b0fc45572caf17af2e8f46fb3f0a181f084ef9dd`.
+Always use the host's
+[`Cargo.toml`](https://github.com/oupadhyay/shard-v2/blob/main/src-tauri/Cargo.toml)
+and
+[`Cargo.lock`](https://github.com/oupadhyay/shard-v2/blob/main/src-tauri/Cargo.lock)
+as the authoritative record of active pins; a docs-only sibling HEAD is not
+necessarily consumed. Future portable changes remain standalone-first, then
+require an explicit pinned host update and lockfile/dependency-graph
+validation.
+
 ## Host GUI Regression Matrix
 
 This crate has no GUI. Validate behavior through the real `shard-v2` Tauri
